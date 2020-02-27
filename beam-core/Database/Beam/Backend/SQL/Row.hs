@@ -20,6 +20,7 @@ import           Control.Applicative
 import           Control.Exception (Exception)
 import           Control.Monad.Free.Church
 import           Control.Monad.Identity
+import           Control.Monad.Fail
 import           Data.Tagged
 import           Data.Typeable
 import           Data.Vector.Sized (Vector)
