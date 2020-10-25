@@ -14,6 +14,7 @@ module Database.Beam.Postgres.Migrate
   , postgresDataTypeDeserializers
   , pgPredConverter
   , getDbConstraints
+  , getDbConstraintsForSchemas
   , pgTypeToHs
   , migrateScript
   , writeMigrationScript
@@ -54,7 +55,6 @@ import           Control.Applicative ((<|>))
 import           Control.Arrow
 import           Control.Exception (bracket)
 import           Control.Monad
-import           Control.Monad.Free.Church (liftF)
 
 import           Data.Aeson hiding (json)
 import           Data.Bits
@@ -89,7 +89,7 @@ migrationBackend = Tool.BeamMigrationBackend
                                  , "  postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]"
                                  , ""
                                  , "See <https://www.postgresql.org/docs/9.5/static/libpq-connect.html#LIBPQ-CONNSTRING> for more information" ])
-                        (liftF (PgLiftWithHandle getDbConstraints id))
+                        (liftIOWithHandle getDbConstraints)
                         (Db.sql92Deserializers <> Db.sql99DataTypeDeserializers <>
                          Db.sql2008BigIntDataTypeDeserializers <>
                          postgresDataTypeDeserializers <>
@@ -324,8 +324,13 @@ pgUnknownDataType oid@(Pg.Oid oid') pgMod =
 -- * Create constraints from a connection
 
 getDbConstraints :: Pg.Connection -> IO [ Db.SomeDatabasePredicate ]
-getDbConstraints conn =
-  do tbls <- Pg.query_ conn "SELECT cl.oid, relname FROM pg_catalog.pg_class \"cl\" join pg_catalog.pg_namespace \"ns\" on (ns.oid = relnamespace) where nspname = any (current_schemas(false)) and relkind='r'"
+getDbConstraints = getDbConstraintsForSchemas Nothing
+
+getDbConstraintsForSchemas :: Maybe [String] -> Pg.Connection -> IO [ Db.SomeDatabasePredicate ]
+getDbConstraintsForSchemas subschemas conn =
+  do tbls <- case subschemas of
+        Nothing -> Pg.query_ conn "SELECT cl.oid, relname FROM pg_catalog.pg_class \"cl\" join pg_catalog.pg_namespace \"ns\" on (ns.oid = relnamespace) where nspname = any (current_schemas(false)) and relkind='r'"
+        Just ss -> Pg.query  conn "SELECT cl.oid, relname FROM pg_catalog.pg_class \"cl\" join pg_catalog.pg_namespace \"ns\" on (ns.oid = relnamespace) where nspname IN ? and relkind='r'" (Pg.Only (Pg.In ss))
      let tblsExist = map (\(_, tbl) -> Db.SomeDatabasePredicate (Db.TableExistsPredicate (Db.QualifiedName Nothing tbl))) tbls
 
      enumerationData <-
@@ -368,7 +373,11 @@ getDbConstraints conn =
      let enumerations =
            map (\(enumNm, _, options) -> Db.SomeDatabasePredicate (PgHasEnum enumNm (V.toList options))) enumerationData
 
-     pure (tblsExist ++ columnChecks ++ primaryKeys ++ enumerations)
+     extensions <-
+       map (\(Pg.Only extname) -> Db.SomeDatabasePredicate (PgHasExtension extname)) <$>
+       Pg.query_ conn "SELECT extname from pg_extension"
+
+     pure (tblsExist ++ columnChecks ++ primaryKeys ++ enumerations ++ extensions)
 
 -- * Postgres-specific data types
 
